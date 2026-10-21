@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/NVlabs/GR00T-WholeBodyControl",
+  "base_revision": "c374bae5b9039cd0ee71377e654d11ce1bc69e1d",
+  "apply": "git apply /path/to/g1-sonic-extensions/patches/local-code.patch; copy tools/ into the checkout",
+  "patch_paths": [
+    "gear_sonic/scripts/pico_manager_thread_server.py",
+    "gear_sonic/scripts/run_sim_loop.py",
+    "gear_sonic_deploy/deploy.sh",
+    "gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/input_interface.hpp",
+    "gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/streamed_motion_merger.hpp",
+    "gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp",
+    "gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/motion_data_reader.hpp",
+    "gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp"
+  ]
+}

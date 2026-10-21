@@ -1,0 +1,173 @@
+{
+  "prepared_date": "2026-10-21",
+  "files": [
+    {
+      "path": ".gitignore",
+      "sha256": "09f81f49edc4cea9d07ecee5739802dba8f0e44425b125f5d35a007e35c6669f"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "24ab66be50d1aca4fc5e029ef76ce4ceaac6557ea21665caf4b140695a76ffee"
+    },
+    {
+      "path": "README.md",
+      "sha256": "4b44f687c8c76001436e7b19414ba94e14cd3a545a179dc7800a1240103dc5c6"
+    },
+    {
+      "path": "UPSTREAM.json",
+      "sha256": "260b76590dba5262396c1d178c5e61c79b0be52db1bf7a3b1cb80bdc242e1ca1"
+    },
+    {
+      "path": "data/.gitkeep",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "legal/Apache License - GEAR-SONIC.txt",
+      "sha256": "4d42f1db12bb3b31150f735fdb3e18f40c7984f50f17bcad783e9bb5251e74b7"
+    },
+    {
+      "path": "legal/DCO - GEAR-SONIC.txt",
+      "sha256": "ce79005e7860757336cd75dd2ea56c9a30b4b4d72cc0b336411aa15baee3ed57"
+    },
+    {
+      "path": "legal/THIRD-PARTY SOFTWARE NOTICES - GEAR-SONIC.txt",
+      "sha256": "f88d3638f4eee9e3f3e52c13eccca950755cbaaae4e9923a2d45435b2574d3be"
+    },
+    {
+      "path": "legal/THIRD-PARTY SOFTWARE NOTICES AND ASSET LICENSES - GEAR-SONIC.txt",
+      "sha256": "23fb2ecf02259d8fc78850e4f1466d44e01fbe514c5f2ffbab0578bd0054f0e0"
+    },
+    {
+      "path": "patches/local-code.patch",
+      "sha256": "44cc3eaff46a22bf87f015df10e104d5a46a859065ae2b8493b326ade3c25ce0"
+    },
+    {
+      "path": "requirements-offline.txt",
+      "sha256": "a397020d8484fc118f5bcdf4137d4d87c6809f83aa8aa5fe9d6fcbd8d9edbb36"
+    },
+    {
+      "path": "tools/build_bones_continuous.py",
+      "sha256": "c40273003905401743417e770f1c468b0e3300a425ee0f00a156469da3473028"
+    },
+    {
+      "path": "tools/build_bones_crawl_extension.py",
+      "sha256": "4e97dc319772caae1868f157f92b7226401d037362714fd13140ece1d9cd3f2c"
+    },
+    {
+      "path": "tools/build_bones_crouch_pair.py",
+      "sha256": "a528d26d91f870d1eb3ea93b8e26030fd69f49ec73dae3c6b2f9d1d150a0a517"
+    },
+    {
+      "path": "tools/build_bones_walk_video_pack.py",
+      "sha256": "dfbd8f842f2a9d8a09704e784b76424f3307b64275e8d8088fdb88b7028486f0"
+    },
+    {
+      "path": "tools/build_bones_wall_contact_layout.py",
+      "sha256": "13c981f7ee3e175697867ca1d0cb9de44aed141f6ebeacbc0d1579d548c5f370"
+    },
+    {
+      "path": "tools/build_sonic_module_sequence.py",
+      "sha256": "6ba2d391d96d60189a889dc52337a23aa42fe7f4f319718bd6ef18197a2d8915"
+    },
+    {
+      "path": "tools/convert_bones_to_sonic_reference.py",
+      "sha256": "1788b25dfbeb064ae6aaa44471cc52be00b93d203566c624f96a6a001d3a401e"
+    },
+    {
+      "path": "tools/convert_kimodo_to_sonic_reference.py",
+      "sha256": "7d765f45b98b908edb934dc023ff02fd108d574ae4a9ae34c7a09920d34f1a97"
+    },
+    {
+      "path": "tools/debug_isaac_teleop_body.py",
+      "sha256": "c9f0c69efc6ef24500850481ff183a839449a0e4997f5376e353a1e29b8074e8"
+    },
+    {
+      "path": "tools/download_bones_seed_selected.py",
+      "sha256": "e1c66f01f018e847db8faca9986eada3eedc1d7febed576b1717fd8d97770298"
+    },
+    {
+      "path": "tools/extend_sonic_reference_hold.py",
+      "sha256": "09c828492dc61edfa1450f544fe601a31da4a5da987fced1c438004a827dd0f0"
+    },
+    {
+      "path": "tools/generate_kimodo_demo_clips.py",
+      "sha256": "d3a0f02146502eda8c72c4e24085d5ada3e784f73185b2e96913fa3846e084fc"
+    },
+    {
+      "path": "tools/merge_sonic_reference_motions.py",
+      "sha256": "cc72cf3a08d965e885b7b28e4af60f01c0cfad67da66ba299bc2ae3281ce6785"
+    },
+    {
+      "path": "tools/plot_actual_bones_route.py",
+      "sha256": "363e6c73825fc6c14272a6692c3e7ff7d804cfd29cb0e69e6adcc3f87274e2a1"
+    },
+    {
+      "path": "tools/plot_bones_apartment.py",
+      "sha256": "c5d5951666ef26943692550b0aace1102f518596f9a3db3eab81c650351743ab"
+    },
+    {
+      "path": "tools/plot_bones_crawl_route.py",
+      "sha256": "a5c5c5d12ef370be6827058c1a579d2ef95053dc5d99b54d0544bc04c960e186"
+    },
+    {
+      "path": "tools/prepare_sonic_teleop_handover_motion.py",
+      "sha256": "211e31f2a6aa708eb44c6d3efb49e02816ae8fd632ef431e6c31052e67097a7f"
+    },
+    {
+      "path": "tools/preview_sonic_reference.py",
+      "sha256": "5564ec5652844ae525427aa33fd094a4f21e197e5e03a7c30fccf0ecb0a50591"
+    },
+    {
+      "path": "tools/render_bones_wall_contact_poses.py",
+      "sha256": "5c72e6c2216fadd992a597536934b1ff8472386537622ae8516cb8576606f61b"
+    },
+    {
+      "path": "tools/render_isaac_recorded_videos.py",
+      "sha256": "24cb484c042dcdb319d3e3cea679dcfc56ab88006297f8005edd741d5eaa2e25"
+    },
+    {
+      "path": "tools/test_build_bones_continuous.py",
+      "sha256": "a168eab982d65191ddb1cd4f2ef3aa3718a6e18dd55a04bcf47a706b5c914f81"
+    },
+    {
+      "path": "tools/test_build_bones_crawl_extension.py",
+      "sha256": "644c0fca4b992d773346e84443af7f233b634689777c768b108e794adc42aae4"
+    },
+    {
+      "path": "tools/test_build_bones_wall_contact_layout.py",
+      "sha256": "abfdb19c577df7a59e7caf12dd8429034347ca9eca355ff202768c2184d559ae"
+    },
+    {
+      "path": "tools/test_convert_kimodo_to_sonic_reference.py",
+      "sha256": "fa4de70a52c80d33ed45809a36cae13dad63772e09334bc88fff8b5b1a53a8b1"
+    },
+    {
+      "path": "tools/test_render_isaac_recorded_videos.py",
+      "sha256": "b1da3414644eb7c2707eb224fe91e6082ba6970dc4146c2c6cb527eb2427d33a"
+    },
+    {
+      "path": "tools/test_trim_bones_motion_pauses.py",
+      "sha256": "15f82d558099438823b205b841ea6334bf783746740858c4125702ae568ede7d"
+    },
+    {
+      "path": "tools/test_validate_isaac_recorded_videos.py",
+      "sha256": "b3001919813c90f89d8723b9886ffd914db27cfedfc3a42936a141c5ed79b593"
+    },
+    {
+      "path": "tools/tests/test_generate_kimodo_demo_clips.py",
+      "sha256": "fb38bbb68a2a8ef14f05e7c3add48f214eb7c2a2f39949bfed51b2413253f0e6"
+    },
+    {
+      "path": "tools/trim_bones_motion_pauses.py",
+      "sha256": "ecb630cc87a13172327fdcd69cb06e69d05c29f719ad4b7d9aca31d58e5130ab"
+    },
+    {
+      "path": "tools/trim_sonic_reference_motion.py",
+      "sha256": "bf6d61460a6ffc80409d263ad2d82e1ae7fa7b593f5f3c84f60262028a072e31"
+    },
+    {
+      "path": "tools/validate_isaac_recorded_videos.py",
+      "sha256": "5fbc1f46d7a28cd760a52a0bce64348df4348e79629ab90694e4f17ea41a33f9"
+    }
+  ]
+}

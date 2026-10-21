@@ -1,0 +1,1117 @@
+diff --git a/gear_sonic/scripts/pico_manager_thread_server.py b/gear_sonic/scripts/pico_manager_thread_server.py
+index 3983530..44e0f76 100644
+--- a/gear_sonic/scripts/pico_manager_thread_server.py
++++ b/gear_sonic/scripts/pico_manager_thread_server.py
+@@ -167,7 +167,7 @@ OFFSETS = [
+ ]
+ 
+ 
+-def _compute_rel_transform(pose, world_frame, scalar_first=True):
++def _compute_rel_transform(pose, world_frame, scalar_first=True, openxr_coordinates=False):
+     """
+     Transform a pose from Unity coordinate frame to robot coordinate frame.
+ 
+@@ -186,9 +186,12 @@ def _compute_rel_transform(pose, world_frame, scalar_first=True):
+     """
+     world_frame = world_frame.copy()
+ 
+-    # Q transforms Unity coordinates to Robot coordinates
+-    # Unity [x, y, z] -> Robot [-x, z, y]
+-    Q = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0.0]])
++    if openxr_coordinates:
++        # OpenXR: +X right, +Y up, -Z forward -> Robot: +X forward, +Y left, +Z up
++        Q = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0.0]])
++    else:
++        # Unity: +X right, +Y up, +Z forward -> Robot: +X forward, +Y left, +Z up
++        Q = np.array([[-1, 0, 0], [0, 0, 1], [0, 1, 0.0]])
+     pose[:3] = Q @ pose[:3]
+     world_frame[:3] = Q @ world_frame[:3]
+     rot_base = sRot.from_quat(world_frame[3:], scalar_first=scalar_first).as_matrix()
+@@ -198,7 +201,7 @@ def _compute_rel_transform(pose, world_frame, scalar_first=True):
+     return rel_pos, rel_rot.as_quat(scalar_first=True)
+ 
+ 
+-def _process_3pt_pose(smpl_pose_np):
++def _process_3pt_pose(smpl_pose_np, openxr_coordinates=False):
+     """
+     Extract 3-point VR pose (L-Wrist, R-Wrist, Neck) from full SMPL body joint poses.
+ 
+@@ -245,7 +248,10 @@ def _process_3pt_pose(smpl_pose_np):
+     body_poses = np.zeros((smpl_pose_np.shape[0], 7), dtype=np.float32)
+     for i in range(smpl_pose_np.shape[0]):
+         pos, orn = _compute_rel_transform(
+-            smpl_pose_np[i], [0, 0, 0, 0, 0, 0, 1], scalar_first=False
++            smpl_pose_np[i],
++            [0, 0, 0, 0, 0, 0, 1],
++            scalar_first=False,
++            openxr_coordinates=openxr_coordinates,
+         )
+         body_poses[i, :3] = pos  # Position in robot frame
+         body_poses[i, 3:] = orn  # Quaternion [qw, qx, qy, qz] in robot frame
+@@ -263,15 +269,17 @@ def _process_3pt_pose(smpl_pose_np):
+     positions = np.array([[p[0], p[1], p[2]] for p in body_poses])
+     kp_poses = np.zeros((4, 7), dtype=np.float32)
+ 
++    wrist_indices = [20, 21] if openxr_coordinates else [22, 23]
++    keypoint_indices = [0, *wrist_indices, 12]
+     for i, pose in enumerate(body_poses):
+-        if i not in [0, 22, 23, 12]:
++        if i not in keypoint_indices:
+             continue  # Skip joints we don't care about
+ 
+         pos = positions[i]
+ 
+         # Map SMPL joint index to our keypoint index (0-3)
+         # rel_i: 0=Root, 1=L-Wrist, 2=R-Wrist, 3=Neck
+-        rel_i = [0, 22, 23, 12].index(i)
++        rel_i = keypoint_indices.index(i)
+ 
+         # Extract quaternion and apply rotation offset
+         # pose[3:7] is [qw, qx, qy, qz] (scalar-first from _compute_rel_transform)
+@@ -558,24 +566,193 @@ class YawAccumulator:
+         return self.heading
+ 
+ 
+-def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndarray):
++_XR_BD_CHILDREN = {
++    1: (4,),
++    2: (5,),
++    3: (6,),
++    4: (7,),
++    5: (8,),
++    6: (9,),
++    7: (10,),
++    8: (11,),
++    9: (12, 13, 14),
++    12: (15,),
++    13: (16,),
++    14: (17,),
++    16: (18,),
++    17: (19,),
++    18: (20,),
++    19: (21,),
++    20: (22,),
++    21: (23,),
++}
++_XR_BD_DEBUG_JOINTS = (0, 1, 2, 4, 5, 7, 8, 20, 21)
++_XR_BD_JOINT_NAMES = (
++    "pelvis",
++    "left_hip",
++    "right_hip",
++    "spine1",
++    "left_knee",
++    "right_knee",
++    "spine2",
++    "left_ankle",
++    "right_ankle",
++    "spine3",
++    "left_foot",
++    "right_foot",
++    "neck",
++    "left_collar",
++    "right_collar",
++    "head",
++    "left_shoulder",
++    "right_shoulder",
++    "left_elbow",
++    "right_elbow",
++    "left_wrist",
++    "right_wrist",
++    "left_hand",
++    "right_hand",
++)
++_SMPL_REST_JOINTS = None
++_XR_BD_DEBUG_PRINTED = False
++
++
++def _get_smpl_rest_joints() -> np.ndarray:
++    global _SMPL_REST_JOINTS
++    if _SMPL_REST_JOINTS is None:
++        info_path = os.path.normpath(
++            os.path.join(os.path.dirname(__file__), "..", "data", "human", "human_joints_info.pkl")
++        )
++        info = torch.load(info_path, map_location="cpu", weights_only=True)
++        _SMPL_REST_JOINTS = info["J"].detach().cpu().numpy()
++    return _SMPL_REST_JOINTS
++
++
++def _align_directions(rest_vectors: np.ndarray, observed_vectors: np.ndarray) -> sRot:
++    """Return the minimum rotation mapping SMPL rest directions to tracked directions."""
++    rest_vectors = np.asarray(rest_vectors, dtype=np.float64)
++    observed_vectors = np.asarray(observed_vectors, dtype=np.float64)
++    rest_vectors /= np.linalg.norm(rest_vectors, axis=1, keepdims=True)
++    observed_vectors /= np.linalg.norm(observed_vectors, axis=1, keepdims=True)
++    return sRot.align_vectors(observed_vectors, rest_vectors)[0]
++
++
++def _xr_bd_to_smpl_local_rots(positions: np.ndarray, parent_indices: list) -> tuple[list, np.ndarray]:
++    """Retarget XR_BD bone poses to SMPL joint rotations using anatomical positions.
++
++    XR_BD orientations describe vendor bone frames.  Their bind axes differ per
++    side (notably at the hips), while SMPL expects rotations relative to its own
++    rest skeleton.  Direction alignment removes those bind-frame offsets without
++    changing the raw IsaacTeleop data.
++    """
++    smpl_rest = _get_smpl_rest_joints()
++    openxr_to_smpl = sRot.from_euler("y", 180, degrees=True)
++    positions_smpl = openxr_to_smpl.apply(positions)
++
++    local_rots = []
++    global_rots = []
++    for joint_index in range(24):
++        if joint_index == 0:
++            # The first spine segment is very short/noisy.  Hips + neck define a
++            # stable pelvis frame while retaining the tracked body lean/heading.
++            children = (1, 2, 12)
++        else:
++            children = _XR_BD_CHILDREN.get(joint_index, ())
++
++        if children:
++            if joint_index == 20:
++                # SMPL-X finger bases define the left palm direction.
++                rest_vectors = np.array(
++                    [smpl_rest[[25, 28, 31, 34, 37]].mean(axis=0) - smpl_rest[joint_index]]
++                )
++            elif joint_index == 21:
++                # SMPL-X finger bases define the right palm direction.
++                rest_vectors = np.array(
++                    [smpl_rest[[40, 43, 46, 49, 52]].mean(axis=0) - smpl_rest[joint_index]]
++                )
++            else:
++                rest_vectors = np.array(
++                    [smpl_rest[child] - smpl_rest[joint_index] for child in children]
++                )
++            observed_vectors = np.array(
++                [positions_smpl[child] - positions_smpl[joint_index] for child in children]
++            )
++            parent = parent_indices[joint_index]
++            if parent >= 0:
++                observed_vectors = global_rots[parent].inv().apply(observed_vectors)
++            local_rot = _align_directions(rest_vectors, observed_vectors)
++        else:
++            # Leaf twist is not observable from joint positions.  Identity is the
++            # neutral SMPL value and cannot displace another tracked joint.
++            local_rot = sRot.identity()
++
++        local_rots.append(local_rot)
++        parent = parent_indices[joint_index]
++        global_rots.append(local_rot if parent < 0 else global_rots[parent] * local_rot)
++
++    return local_rots, positions_smpl
++
++
++def _print_xr_bd_rotation_debug(
++    parent_indices: list, body_poses_np: np.ndarray, converted_local_rots: list
++) -> None:
++    global _XR_BD_DEBUG_PRINTED
++    if _XR_BD_DEBUG_PRINTED:
++        return
++    _XR_BD_DEBUG_PRINTED = True
++
++    # Reproduce the former conversion exactly for an immediately comparable angle.
++    raw_global_rots = sRot.from_quat(body_poses_np[:, 3:])
++    raw_global_rots = raw_global_rots * sRot.from_euler("y", 180, degrees=True)
++    raw_local_rots = []
++    for joint_index in range(24):
++        parent = parent_indices[joint_index]
++        raw_local_rots.append(
++            raw_global_rots[joint_index]
++            if parent < 0
++            else raw_global_rots[parent].inv() * raw_global_rots[joint_index]
++        )
++
++    print("[XR_BD -> SMPL] raw bone-frame vs converted local rotation (degrees)")
++    print("idx  name          raw_local  converted")
++    for joint_index in _XR_BD_DEBUG_JOINTS:
++        raw_angle = np.linalg.norm(raw_local_rots[joint_index].as_rotvec()) * 180.0 / np.pi
++        converted_angle = (
++            np.linalg.norm(converted_local_rots[joint_index].as_rotvec()) * 180.0 / np.pi
++        )
++        print(
++            f"{joint_index:>3}  {_XR_BD_JOINT_NAMES[joint_index]:<13} "
++            f"{raw_angle:>9.2f}  {converted_angle:>9.2f}"
++        )
++
++
++def compute_from_body_poses(
++    parent_indices: list,
++    device,
++    body_poses_np: np.ndarray,
++    xr_bd_joint_frames: bool = False,
++):
+     """
+     Compute local joints and body orientation from provided body_poses_np.
+     """
+     positions = body_poses_np[:, :3]
+-    global_quats = body_poses_np[:, [6, 3, 4, 5]]
++    if xr_bd_joint_frames:
++        local_rots, positions = _xr_bd_to_smpl_local_rots(positions, parent_indices)
++        _print_xr_bd_rotation_debug(parent_indices, body_poses_np, local_rots)
++    else:
++        global_quats = body_poses_np[:, [6, 3, 4, 5]]
+ 
+-    # Convert to local rotations
+-    global_rots = sRot.from_quat(global_quats, scalar_first=True)
+-    global_rots = global_rots * sRot.from_euler("y", 180, degrees=True)
++        # Legacy XRoboToolkit input is already expressed in Unity/SMPL-compatible frames.
++        global_rots = sRot.from_quat(global_quats, scalar_first=True)
++        global_rots = global_rots * sRot.from_euler("y", 180, degrees=True)
+ 
+-    local_rots = []
+-    for i in range(24):
+-        if parent_indices[i] == -1:
+-            local_rots.append(global_rots[i])
+-        else:
+-            local_rot = global_rots[parent_indices[i]].inv() * global_rots[i]
+-            local_rots.append(local_rot)
++        local_rots = []
++        for i in range(24):
++            if parent_indices[i] == -1:
++                local_rots.append(global_rots[i])
++            else:
++                local_rot = global_rots[parent_indices[i]].inv() * global_rots[i]
++                local_rots.append(local_rot)
+ 
+     pose_aa = np.array([rot.as_rotvec() for rot in local_rots])
+ 
+@@ -911,6 +1088,7 @@ def _pose_stream_common(
+         enable_waist_tracking=enable_waist_tracking,
+         enable_smpl_vis=enable_smpl_vis,
+         log_prefix=log_prefix,
++        openxr_coordinates=isinstance(reader, input_readers.IsaacTeleopReader),
+     )
+ 
+     streamer = PoseStreamer(
+@@ -965,6 +1143,7 @@ class ThreePointPose:
+         enable_smpl_vis: bool = False,
+         log_prefix: str = "ThreePointPose",
+         robot_model=None,
++        openxr_coordinates: bool = False,
+     ):
+         """
+         Initialize 3-point pose processor.
+@@ -982,6 +1161,7 @@ class ThreePointPose:
+         self.with_g1_robot = with_g1_robot
+         self.enable_waist_tracking = enable_waist_tracking
+         self.enable_smpl_vis = enable_smpl_vis
++        self.openxr_coordinates = openxr_coordinates
+ 
+         # Robot model for FK-based calibration (headless, no display required)
+         self._robot_model = robot_model
+@@ -1054,7 +1234,9 @@ class ThreePointPose:
+                          [L-Wrist, R-Wrist, Neck], each row [x, y, z, qw, qx, qy, qz]
+         """
+         # Extract raw 3-point pose from SMPL
+-        vr_3pt_pose_raw = _process_3pt_pose(smpl_pose_np)
++        vr_3pt_pose_raw = _process_3pt_pose(
++            smpl_pose_np, openxr_coordinates=self.openxr_coordinates
++        )
+ 
+         # Capture calibration on first valid frame (or after reset)
+         if self._calibration_pending:
+@@ -1083,7 +1265,9 @@ class ThreePointPose:
+         """Calibrate using current SMPL frame against FK of all-zero body joints.
+         Operator should be in zero-reference pose when calling this."""
+         try:
+-            vr_3pt_pose_raw = _process_3pt_pose(body_poses_np)
++            vr_3pt_pose_raw = _process_3pt_pose(
++                body_poses_np, openxr_coordinates=self.openxr_coordinates
++            )
+             self._override_robot_q = np.zeros(29, dtype=np.float64)
+             self._capture_calibration(vr_3pt_pose_raw)
+             print(f"[{self.log_prefix}] Calibration completed (zero-pose reference)")
+@@ -1294,7 +1478,7 @@ class PoseStreamer:
+             18,
+             19,
+             20,
+-            22,
++            21,
+             23,
+         ][:24]
+ 
+@@ -1346,7 +1530,10 @@ class PoseStreamer:
+             return
+ 
+         latest_data = compute_from_body_poses(
+-            self.parent_indices, self.device, sample["body_poses_np"]
++            self.parent_indices,
++            self.device,
++            sample["body_poses_np"],
++            xr_bd_joint_frames=isinstance(self.reader, input_readers.IsaacTeleopReader),
+         )
+         left_menu_button, left_trigger, right_trigger, left_grip, right_grip = get_controller_inputs(
+             self.reader
+@@ -1941,6 +2128,7 @@ def run_pico_manager(
+         enable_waist_tracking=enable_waist_tracking,
+         enable_smpl_vis=enable_smpl_vis,
+         log_prefix="PoseLoop",
++        openxr_coordinates=isinstance(reader, input_readers.IsaacTeleopReader),
+     )
+ 
+     pose_streamer = PoseStreamer(
+diff --git a/gear_sonic/scripts/run_sim_loop.py b/gear_sonic/scripts/run_sim_loop.py
+index 9115e77..7f6ba00 100644
+--- a/gear_sonic/scripts/run_sim_loop.py
++++ b/gear_sonic/scripts/run_sim_loop.py
+@@ -8,7 +8,7 @@ from typing import Dict
+ 
+ import tyro
+ 
+-from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory, init_channel
++from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory
+ from gear_sonic.utils.mujoco_sim.configs import SimLoopConfig
+ from gear_sonic.data.robot_model.instantiation.g1 import (
+     instantiate_g1_robot_model,
+@@ -23,8 +23,6 @@ class SimWrapper:
+         self.robot_model = robot_model
+         self.config = config
+ 
+-        init_channel(config=self.config)
+-
+         # Create simulator using factory
+         self.sim = SimulatorFactory.create_simulator(
+             config=self.config,
+@@ -65,4 +63,4 @@ def main(config: ArgsConfig):
+ 
+ if __name__ == "__main__":
+     config = tyro.cli(ArgsConfig)
+-    main(config)
+\ No newline at end of file
++    main(config)
+diff --git a/gear_sonic_deploy/deploy.sh b/gear_sonic_deploy/deploy.sh
+index 6bcc617..d04c0a8 100755
+--- a/gear_sonic_deploy/deploy.sh
++++ b/gear_sonic_deploy/deploy.sh
+@@ -211,6 +211,11 @@ show_usage() {
+     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
+     echo "  --output-type TYPE      Set the output type (default: ros2)"
+     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
++    echo "  --soft-teleop-handover  ENTER switches smoothly between motion and full-body POSE teleop"
++    echo "  --teleop-blend-seconds SECONDS"
++    echo "                          Soft handover duration (default: 3.0)"
++    echo "  --teleop-max-joint-speed RAD_S"
++    echo "                          Joint-target slew limit during handover (default: 1.0)"
+     echo ""
+     echo "Interface modes:"
+     echo "  sim              Use loopback interface for simulation (MuJoCo)"
+@@ -251,6 +256,9 @@ MOTION_DATA="$MOTION_DATA_DEFAULT"
+ INPUT_TYPE="$INPUT_TYPE_DEFAULT"
+ OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
+ ZMQ_HOST="$ZMQ_HOST_DEFAULT"
++SOFT_TELEOP_HANDOVER=false
++TELEOP_BLEND_SECONDS="3.0"
++TELEOP_MAX_JOINT_SPEED="1.0"
+ 
+ # Parse arguments
+ while [[ $# -gt 0 ]]; do
+@@ -315,6 +323,26 @@ while [[ $# -gt 0 ]]; do
+             ZMQ_HOST="$2"
+             shift 2
+             ;;
++        --soft-teleop-handover)
++            SOFT_TELEOP_HANDOVER=true
++            shift
++            ;;
++        --teleop-blend-seconds)
++            if [[ -z "$2" ]]; then
++                echo -e "${RED}Error: --teleop-blend-seconds requires a value${NC}" >&2
++                exit 1
++            fi
++            TELEOP_BLEND_SECONDS="$2"
++            shift 2
++            ;;
++        --teleop-max-joint-speed)
++            if [[ -z "$2" ]]; then
++                echo -e "${RED}Error: --teleop-max-joint-speed requires a value${NC}" >&2
++                exit 1
++            fi
++            TELEOP_MAX_JOINT_SPEED="$2"
++            shift 2
++            ;;
+         sim|real)
+             INTERFACE_MODE="$1"
+             shift
+@@ -327,6 +355,11 @@ while [[ $# -gt 0 ]]; do
+     esac
+ done
+ 
++if [[ "$SOFT_TELEOP_HANDOVER" == true && "$INPUT_TYPE" != "zmq" ]]; then
++    echo -e "${RED}Error: --soft-teleop-handover requires --input-type zmq${NC}" >&2
++    exit 1
++fi
++
+ # ============================================================================
+ # Display Header
+ # ============================================================================
+@@ -387,6 +420,15 @@ if [[ "$ENV_TYPE" == "sim" ]]; then
+     echo ""
+ fi
+ 
++TELEOP_ARGS=()
++if [[ "$SOFT_TELEOP_HANDOVER" == true ]]; then
++    TELEOP_ARGS+=(
++        --soft-teleop-handover
++        --teleop-blend-seconds "$TELEOP_BLEND_SECONDS"
++        --teleop-max-joint-speed "$TELEOP_MAX_JOINT_SPEED"
++    )
++fi
++
+ # ============================================================================
+ # Step 1: Check Prerequisites
+ # ============================================================================
+@@ -515,6 +557,11 @@ echo -e "  Planner:            ${GREEN}$PLANNER${NC}"
+ echo -e "  Input Type:         ${GREEN}$INPUT_TYPE${NC}"
+ echo -e "  Output Type:        ${GREEN}$OUTPUT_TYPE${NC}"
+ echo -e "  ZMQ Host:           ${GREEN}$ZMQ_HOST${NC}"
++echo -e "  Soft Teleop Handover:${GREEN} $SOFT_TELEOP_HANDOVER${NC}"
++if [[ "$SOFT_TELEOP_HANDOVER" == true ]]; then
++echo -e "  Handover Blend:     ${GREEN}$TELEOP_BLEND_SECONDS s${NC}"
++echo -e "  Handover Max Speed: ${GREEN}$TELEOP_MAX_JOINT_SPEED rad/s${NC}"
++fi
+ if [[ -n "$EXTRA_ARGS" ]]; then
+ echo -e "  Extra Args:         ${GREEN}$EXTRA_ARGS${NC}"
+ fi
+@@ -530,6 +577,9 @@ echo -e "${BLUE}    --planner-file $PLANNER \\${NC}"
+ echo -e "${BLUE}    --input-type $INPUT_TYPE \\${NC}"
+ echo -e "${BLUE}    --output-type $OUTPUT_TYPE \\${NC}"
+ echo -e "${BLUE}    --zmq-host $ZMQ_HOST${NC}"
++if [[ ${#TELEOP_ARGS[@]} -gt 0 ]]; then
++echo -e "${BLUE}    ${TELEOP_ARGS[*]}${NC}"
++fi
+ if [[ -n "$EXTRA_ARGS" ]]; then
+ echo -e "${BLUE}    $EXTRA_ARGS${NC}"
+ fi
+@@ -560,6 +610,7 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
+             --input-type "$INPUT_TYPE" \
+             --output-type "$OUTPUT_TYPE" \
+             --zmq-host "$ZMQ_HOST" \
++            "${TELEOP_ARGS[@]}" \
+             $EXTRA_ARGS
+     else
+         just run g1_deploy_onnx_ref "$TARGET" "$CHECKPOINT_DECODER" "$MOTION_DATA" \
+@@ -568,7 +619,8 @@ if [[ "$confirm" =~ ^[Yy]$ ]] || [[ -z "$confirm" ]]; then
+             --planner-file "$PLANNER" \
+             --input-type "$INPUT_TYPE" \
+             --output-type "$OUTPUT_TYPE" \
+-            --zmq-host "$ZMQ_HOST"
++            --zmq-host "$ZMQ_HOST" \
++            "${TELEOP_ARGS[@]}"
+     fi
+ else
+     echo ""
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/input_interface.hpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/input_interface.hpp
+index 877a139..fc5ee23 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/input_interface.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/input_interface.hpp
+@@ -106,6 +106,9 @@ public:
+                             std::mutex& current_motion_mutex,
+                             bool& report_temperature) = 0;
+ 
++    /** @return True once when a soft reference/teleop transition is requested. */
++    virtual bool ConsumeSoftControlTransition() { return false; }
++
+     // ------------------------------------------------------------------
+     // Capability queries – overridden by sub-classes as needed
+     // ------------------------------------------------------------------
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/streamed_motion_merger.hpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/streamed_motion_merger.hpp
+index e128f43..20fcac1 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/streamed_motion_merger.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/streamed_motion_merger.hpp
+@@ -62,7 +62,7 @@ struct MotionSequence;
+ class StreamedMotionMerger {
+ public:
+     /// Compile-time toggle for debug log output.
+-    static constexpr bool DEBUG_LOGGING = true;
++    static constexpr bool DEBUG_LOGGING = false;
+     /// Number of already-consumed frames to retain before the playback cursor
+     /// (provides look-back for interpolation / blending).
+     static constexpr int HISTORY_FRAMES = 5;
+@@ -514,4 +514,3 @@ private:
+ };
+ 
+ #endif // STREAMED_MOTION_MERGER_HPP
+-
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp
+index 4f56765..022beac 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/input_interface/zmq_endpoint_interface.hpp
+@@ -88,7 +88,7 @@
+ class ZMQEndpointInterface : public InputInterface {
+ public:
+     /// Compile-time toggle for debug log output.
+-    static constexpr bool DEBUG_LOGGING = true;
++    static constexpr bool DEBUG_LOGGING = false;
+     
+     // ------------------------------------------------------------------
+     // Per-frame action flags (reset at the start of every update() call)
+@@ -129,8 +129,10 @@ public:
+         int port = 5556,
+         const std::string& topic = "pose",
+         bool use_conflate = false,
+-        bool verbose = false
+-    ) : InputInterface(), host_(host), port_(port), topic_(topic), verbose_(verbose), is_localhost_(host == LOCALHOST) {
++        bool verbose = false,
++        bool soft_teleop_handover = false
++    ) : InputInterface(), host_(host), port_(port), topic_(topic), verbose_(verbose),
++        is_localhost_(host == LOCALHOST), soft_teleop_handover_(soft_teleop_handover) {
+         type_ = InputType::NETWORK;
+         
+         // Set terminal to non-blocking mode (same as SimpleKeyboard)
+@@ -167,6 +169,9 @@ public:
+         std::cout << "[ZMQEndpointInterface] Connected to " << host << ":" << port 
+                   << " topic='" << topic << "'" << std::endl;
+         std::cout << "[ZMQEndpointInterface] Press ENTER to toggle between loaded motions and ZMQ stream" << std::endl;
++        if (soft_teleop_handover_) {
++            std::cout << "[ZMQEndpointInterface] Soft ENTER-triggered teleop handover enabled" << std::endl;
++        }
+     }
+     
+     ~ZMQEndpointInterface() {
+@@ -180,6 +185,10 @@ public:
+     // Flag to trigger safety reset in handle_input
+     bool trigger_safety_reset = false;
+ 
++    bool ConsumeSoftControlTransition() override {
++        return soft_control_transition_requested_.exchange(false);
++    }
++
+     // Update is called each frame - read keyboard and check for network data
+     void update() override {
+         // Check for safety reset trigger from manager
+@@ -304,6 +313,8 @@ public:
+ 
+             // Disable ZMQ streaming and return to reference motion
+             use_zmq_stream = false;
++            soft_handover_waiting_for_stream_ = false;
++            paused_reference_motion_.reset();
+             ResetStreamedMotion(); // Reset motion merger and protocol version
+             
+             std::cout << "Safety reset: ZMQ streaming disabled, returned to reference motion at frame 0" << std::endl;
+@@ -314,38 +325,76 @@ public:
+             use_zmq_stream = !use_zmq_stream;
+             if (use_zmq_stream) {
+                 std::cout << "=====================================" << std::endl;
+-                std::cout << "ZMQ STREAMING MODE: ENABLED" << std::endl;
++                std::cout << (soft_teleop_handover_
++                    ? "FULL-BODY TELEOP: WAITING FOR FRESH SMPL DATA"
++                    : "ZMQ STREAMING MODE: ENABLED") << std::endl;
+                 std::cout << "=====================================" << std::endl;
+                 std::cout << "Using pose data from " << host_ << ":" << port_ << std::endl;
+-                std::cout << "Press ENTER again to return to loaded motions" << std::endl;
+-                // reset the heading state
++                std::cout << "Press ENTER again to resume the paused motion" << std::endl;
+                 {
+                     std::lock_guard<std::mutex> lock(current_motion_mutex);
+                     operator_state.play = false;
+-                    reinitialize_heading = true; // reset the heading state
++                    if (soft_teleop_handover_) {
++                        paused_reference_motion_ = current_motion;
++                        paused_reference_frame_ = current_frame;
++                        paused_reference_encode_mode_ = current_motion
++                            ? current_motion->GetEncodeMode() : 0;
++                        auto held_motion = MakePausedReference(current_motion, current_frame);
++                        if (!held_motion) {
++                            use_zmq_stream = false;
++                            paused_reference_motion_.reset();
++                            std::cerr << "[FullBodyTeleop] Cannot pause an empty reference motion" << std::endl;
++                            return;
++                        }
++                        // Remain in normal G1 reference mode until the first
++                        // fresh VR packet arrives.
++                        held_motion->SetEncodeMode(0);
++                        current_motion = held_motion;
++                        current_frame = 0;
++                        reinitialize_heading = true;
++                    } else {
++                        reinitialize_heading = true;
++                    }
+                 }
+                 // reset streaming buffers when enabling to avoid mixing with stale data
+                 ResetStreamedMotion(); // This also resets protocol version in the merger
+                 has_new_data_ = false;
++                if (soft_teleop_handover_) {
++                    soft_handover_waiting_for_stream_ = true;
++                    std::cout << "[FullBodyTeleop] Motion paused; holding its final G1 pose" << std::endl;
++                }
+             } else {
++                soft_handover_waiting_for_stream_ = false;
+                 std::cout << "=====================================" << std::endl;
+-                std::cout << "ZMQ STREAMING MODE: DISABLED" << std::endl;
++                std::cout << (soft_teleop_handover_
++                    ? "FULL-BODY TELEOP: DISABLED"
++                    : "ZMQ STREAMING MODE: DISABLED") << std::endl;
+                 std::cout << "=====================================" << std::endl;
+-                std::cout << "Using pre-loaded motion data" << std::endl;
+-                
+-                // Encoder mode will be read from the motion's encode_mode
+-                
+-                // reset the current motion and frame
++                std::cout << (soft_teleop_handover_
++                    ? "Smoothly resuming the paused motion"
++                    : "Using pre-loaded motion data") << std::endl;
++
+                 {
+                     std::lock_guard<std::mutex> lock(current_motion_mutex);
+                     has_external_token_state_ = false;
+                     external_token_state_.SetData({});
+-                    operator_state.play = false;
+-                    reinitialize_heading = true;
+-                    current_motion = motion_reader.GetMotionShared(motion_reader.current_motion_index_); // current motion is the pre-loaded motion
+-                    current_frame = 0; // current frame is 0
+-                    if (current_motion->GetEncodeMode() >= 0) {
+-                        current_motion->SetEncodeMode(0);
++                    if (soft_teleop_handover_ && paused_reference_motion_) {
++                        current_motion = paused_reference_motion_;
++                        current_frame = std::clamp(
++                            paused_reference_frame_, 0, current_motion->timesteps - 1);
++                        current_motion->SetEncodeMode(paused_reference_encode_mode_);
++                        operator_state.play = true;
++                        reinitialize_heading = true;
++                        soft_control_transition_requested_.store(true);
++                        paused_reference_motion_.reset();
++                    } else {
++                        operator_state.play = false;
++                        reinitialize_heading = true;
++                        current_motion = motion_reader.GetMotionShared(motion_reader.current_motion_index_);
++                        current_frame = 0;
++                        if (current_motion->GetEncodeMode() >= 0) {
++                            current_motion->SetEncodeMode(0);
++                        }
+                     }
+                 }
+                 // reset the streamed motion (also resets protocol version)
+@@ -388,8 +437,12 @@ public:
+                     if constexpr (DEBUG_LOGGING) {
+                         std::cout << "[ZMQEndpointInterface] *** Starting ZMQ processing ***" << std::endl;
+                     }
+-                    // Decode into a new MotionSequence with current playback position
+-                    auto result = DecodeIntoMotionSequence(current_frame, streamed_motion_, stream_window_start_, heading_state_buffer);
++                    // While waiting for the first fresh packet, the reference
++                    // cursor is frozen. Afterwards track the live stream cursor.
++                    const int decode_frame = soft_handover_waiting_for_stream_
++                        ? teleop_stream_frame_ : current_frame;
++                    auto result = DecodeIntoMotionSequence(
++                        decode_frame, streamed_motion_, stream_window_start_, heading_state_buffer);
+                     
+                     // Handle Protocol v4 (token-only) - no motion, just tokens
+                     if (result.protocol_version == 4) {
+@@ -414,6 +467,10 @@ public:
+                             has_external_token_state_ = true;
+                             operator_state.play = true; // this should be redundant because the robot never read reference motion
+                         }
++                        if (soft_handover_waiting_for_stream_) {
++                            soft_handover_waiting_for_stream_ = false;
++                            soft_control_transition_requested_.store(true);
++                        }
+                         
+                         // Skip motion handling and keyboard controls
+                         return;
+@@ -440,7 +497,9 @@ public:
+                     
+                         
+                         new_motion = result.motion;
+-                        std::cout << "[ZMQEndpointInterface] motion name: " << new_motion->name << std::endl;
++                        if constexpr (DEBUG_LOGGING) {
++                            std::cout << "[ZMQEndpointInterface] motion name: " << new_motion->name << std::endl;
++                        }
+                         stream_window_start_ = result.window_start;
+                         frame_offset_adjustment = result.frame_offset_adjustment;
+                         did_catchup = result.did_catchup_reset;
+@@ -464,7 +523,7 @@ public:
+             // update streamed_motion_ and current_frame if we have new data
+             if (new_motion) {
+                 streamed_motion_ = new_motion;
+-                
++
+                 // Handle catch-up reset: when window was reset due to large gap, start from beginning
+                 if (did_catchup) {
+                     std::lock_guard<std::mutex> lock(current_motion_mutex);
+@@ -504,6 +563,15 @@ public:
+                     current_motion = streamed_motion_;  // Assign shared_ptr directly for thread safety
+                     operator_state.play = true; // Auto-play when entering ZMQ mode
+                 }
++
++                if (soft_handover_waiting_for_stream_) {
++                    soft_handover_waiting_for_stream_ = false;
++                    reinitialize_heading = true;
++                    soft_control_transition_requested_.store(true);
++                    std::cout << "[FullBodyTeleop] Fresh SMPL stream active in encoder mode "
++                              << streamed_motion_->GetEncodeMode()
++                              << "; starting soft handover" << std::endl;
++                }
+                 
+             }
+             return; // Skip keyboard motion controls when in ZMQ mode
+@@ -583,6 +651,56 @@ public:
+     }
+     
+ private:
++    bool soft_teleop_handover_ = false;
++    bool soft_handover_waiting_for_stream_ = false;
++    std::atomic<bool> soft_control_transition_requested_{false};
++    std::shared_ptr<const MotionSequence> paused_reference_motion_;
++    int paused_reference_frame_ = 0;
++    int paused_reference_encode_mode_ = 0;
++    int teleop_stream_frame_ = 0;
++
++    /**
++     * Build a constant reference clip from the currently displayed frame.
++     * This keeps SONIC on a stable G1 target while it waits for the first fresh
++     * full-body SMPL packet after ENTER.
++     */
++    std::shared_ptr<MotionSequence> MakePausedReference(
++        const std::shared_ptr<const MotionSequence>& source,
++        int source_frame) const {
++        if (!source || source->timesteps <= 0) {
++            return nullptr;
++        }
++
++        source_frame = std::clamp(source_frame, 0, source->timesteps - 1);
++        auto held = std::make_shared<MotionSequence>(*source);
++        held->name = source->name + "_teleop_hold";
++
++        for (int frame = 0; frame < held->timesteps; ++frame) {
++            std::copy_n(source->JointPositions(source_frame), source->GetNumJoints(),
++                        held->JointPositions(frame));
++            std::fill_n(held->JointVelocities(frame), held->GetNumJoints(), 0.0);
++
++            std::copy_n(source->BodyPositions(source_frame), source->GetNumBodies(),
++                        held->BodyPositions(frame));
++            std::copy_n(source->BodyQuaternions(source_frame), source->GetNumBodyQuaternions(),
++                        held->BodyQuaternions(frame));
++            std::fill_n(held->BodyLinVelocities(frame), held->GetNumBodies(),
++                        MotionSequence::Velocity{0.0, 0.0, 0.0});
++            std::fill_n(held->BodyAngVelocities(frame), held->GetNumBodies(),
++                        MotionSequence::Velocity{0.0, 0.0, 0.0});
++
++            if (source->GetNumSmplJoints() > 0) {
++                std::copy_n(source->SmplJoints(source_frame), source->GetNumSmplJoints(),
++                            held->SmplJoints(frame));
++            }
++            if (source->GetNumSmplPoses() > 0) {
++                std::copy_n(source->SmplPoses(source_frame), source->GetNumSmplPoses(),
++                            held->SmplPoses(frame));
++            }
++        }
++        return held;
++    }
++
+     /// Reset the streamed motion buffer, merger state, and protocol version.
+     /// Called on construction, when toggling ZMQ mode, and on safety reset.
+     void ResetStreamedMotion() {
+@@ -593,6 +711,7 @@ private:
+         streamed_motion_->name = "streamed";
+         streamed_motion_->ReserveCapacity(15000, 29, 1, 1, 0, 0); // max 15k frames, 29 joints, 1 body, 1 quat
+         stream_window_start_ = 0;
++        teleop_stream_frame_ = 0;
+         data_timestamp_.reset();
+         last_receive_time_.reset();
+     }
+@@ -1467,15 +1586,16 @@ private:
+                 }
+             }
+             
+-            // Print frame indices for protocol v3 (SMPL actions)
+-            if (protocol_version == 3 && !frame_indices.empty()) {
+-                if (frame_indices.size() == 1) {
+-                    std::cout << "[ZMQEndpointInterface] Protocol v3: Received SMPL action (single) - frame_index: " 
+-                              << frame_indices[0] << std::endl;
+-                } else {
+-                    std::cout << "[ZMQEndpointInterface] Protocol v3: Received SMPL action (chunk) - frames: " 
+-                              << frame_indices[0] << " to " << frame_indices.back() 
+-                              << ", chunk_size: " << frame_indices.size() << std::endl;
++            if constexpr (DEBUG_LOGGING) {
++                if (protocol_version == 3 && !frame_indices.empty()) {
++                    if (frame_indices.size() == 1) {
++                        std::cout << "[ZMQEndpointInterface] Protocol v3: Received SMPL action (single) - frame_index: "
++                                  << frame_indices[0] << std::endl;
++                    } else {
++                        std::cout << "[ZMQEndpointInterface] Protocol v3: Received SMPL action (chunk) - frames: "
++                                  << frame_indices[0] << " to " << frame_indices.back()
++                                  << ", chunk_size: " << frame_indices.size() << std::endl;
++                    }
+                 }
+             }
+         }
+@@ -1809,11 +1929,12 @@ private:
+         
+         std::lock_guard<std::mutex> lock(data_mutex_);
+         
+-        // Print message received info
+-        std::cout << "[ZMQEndpointInterface] Received ZMQ message - topic: '" << topic 
+-                  << "', protocol_version: " << hdr.version 
+-                  << ", num_fields: " << hdr.fields.size() 
+-                  << ", total_size: " << bufs.size() << " buffers" << std::endl;
++        if constexpr (DEBUG_LOGGING) {
++            std::cout << "[ZMQEndpointInterface] Received ZMQ message - topic: '" << topic
++                      << "', protocol_version: " << hdr.version
++                      << ", num_fields: " << hdr.fields.size()
++                      << ", total_size: " << bufs.size() << " buffers" << std::endl;
++        }
+         
+         // Buffer the received data for processing in handle_input (main thread)
+         buffered_header_ = hdr;
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/motion_data_reader.hpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/motion_data_reader.hpp
+index 3bc8e69..5cf2f5b 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/motion_data_reader.hpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/include/motion_data_reader.hpp
+@@ -30,6 +30,7 @@
+ #define MOTION_DATA_READER_HPP
+ 
+ #include <iostream>
++#include <algorithm>
+ #include <fstream>
+ #include <vector>
+ #include <string>
+@@ -694,6 +695,10 @@ class MotionDataReader {
+         return false;
+       }
+ 
++      // Keep reference playback deterministic. This also lets playlist
++      // directories use numeric prefixes (01_, 02_, ...) for N/P ordering.
++      std::sort(motion_names.begin(), motion_names.end());
++
+       std::cout << "Found " << motion_names.size() << " motion folders" << std::endl;
+ 
+       for (const auto& motion_name : motion_names) {
+diff --git a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+index a35f0b3..a16a206 100644
+--- a/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
++++ b/gear_sonic_deploy/src/g1/g1_deploy_onnx_ref/src/g1_deploy_onnx_ref.cpp
+@@ -65,6 +65,7 @@
+ #include <chrono>
+ #include <algorithm>
+ #include <numeric>
++#include <cmath>
+ 
+ // DDS
+ #include <unitree/robot/channel/channel_publisher.hpp>
+@@ -298,6 +299,18 @@ class G1Deploy {
+     std::array<double, G1_NUM_MOTOR> last_action;
+     std::array<double, 7> last_left_hand_action;
+     std::array<double, 7> last_right_hand_action;
++
++    // Optional reference-motion -> live-teleop command handover.  The policy
++    // may change reference modalities immediately, but motor targets are
++    // cross-faded and slew-limited so the robot cannot snap to the new pose.
++    bool soft_teleop_handover_ = false;
++    double teleop_blend_seconds_ = 3.0;
++    double teleop_max_joint_speed_ = 1.0;
++    bool teleop_soft_handover_active_ = false;
++    int teleop_handover_step_ = 0;
++    int teleop_handover_total_steps_ = 1;
++    std::array<float, G1_NUM_MOTOR> teleop_handover_source_q_{};
++    std::array<float, G1_NUM_MOTOR> teleop_handover_last_q_{};
+     
+     // =========================================================================
+     // Logging / recording streams
+@@ -2159,7 +2172,10 @@ class G1Deploy {
+       std::string zmq_out_topic = "g1_debug",
+       bool enable_motion_recording = false,
+       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
+-      double initial_max_close_ratio = 1.0)
++      double initial_max_close_ratio = 1.0,
++      bool soft_teleop_handover = false,
++      double teleop_blend_seconds = 3.0,
++      double teleop_max_joint_speed = 1.0)
+       : time_(0.0),
+         publish_dt_(0.002),
+         control_dt_(0.02),
+@@ -2174,6 +2190,9 @@ class G1Deploy {
+         last_action {0.0},
+         last_left_hand_action {0.0},
+         last_right_hand_action {0.0},
++        soft_teleop_handover_(soft_teleop_handover),
++        teleop_blend_seconds_(teleop_blend_seconds),
++        teleop_max_joint_speed_(teleop_max_joint_speed),
+         enable_motion_recording_(enable_motion_recording),
+         initial_vr_3point_compliance_(initial_compliance),
+         initial_max_close_ratio_(initial_max_close_ratio),
+@@ -2478,13 +2497,18 @@ class G1Deploy {
+       }
+       else if (input_type == "zmq") {
+         input_interface_ = std::make_unique<ZMQEndpointInterface>(
+-          zmq_host, zmq_port, zmq_topic, zmq_conflate, zmq_verbose
++          zmq_host, zmq_port, zmq_topic, zmq_conflate, zmq_verbose,
++          soft_teleop_handover_
+         );
+         std::cout << "Initialized ZMQ endpoint interface" << std::endl;
+         std::cout << "  Host: " << zmq_host << ":" << zmq_port << std::endl;
+         std::cout << "  Topic: " << zmq_topic << std::endl;
+         std::cout << "  Conflate: " << (zmq_conflate ? "enabled" : "disabled") << std::endl;
+         std::cout << "  Initial encoder mode: " << initial_encoder_mode_ << std::endl;
++        if (soft_teleop_handover_) {
++          std::cout << "  ENTER-triggered soft handover: " << teleop_blend_seconds_ << " s, max joint speed "
++                    << teleop_max_joint_speed_ << " rad/s" << std::endl;
++        }
+       }
+       else if (input_type == "zmq_manager") {
+         input_interface_ = std::make_unique<ZMQManager>(
+@@ -3117,6 +3141,23 @@ class G1Deploy {
+       // Access actions from control policy's internal buffer (already populated by Infer)
+       auto& action_buffer = policy_engine_->GetActionBuffer();
+       float* floatarr = action_buffer.data();
++
++      if (soft_teleop_handover_ && input_interface_->ConsumeSoftControlTransition()) {
++        auto previous_command = motor_command_buffer_.GetDataWithTime().data;
++        if (previous_command) {
++          teleop_handover_source_q_ = previous_command->q_target;
++          teleop_handover_last_q_ = previous_command->q_target;
++          teleop_handover_step_ = 0;
++          teleop_handover_total_steps_ = std::max(
++              1, static_cast<int>(std::lround(teleop_blend_seconds_ / control_dt_)));
++          teleop_soft_handover_active_ = true;
++          std::cout << "[TeleopHandover] Fresh stream received; softly blending motor targets over "
++                    << teleop_blend_seconds_ << " seconds" << std::endl;
++        } else {
++          std::cerr << "[TeleopHandover] No previous motor command available; refusing automatic handover" << std::endl;
++          return false;
++        }
++      }
+       
+       MotorCommand motor_command_tmp;
+       for (int i = 0; i < G1_NUM_MOTOR; i++) {
+@@ -3128,6 +3169,44 @@ class G1Deploy {
+         motor_command_tmp.kd.at(i) = kds[i];
+         motor_command_tmp.dq_target.at(i) = 0.0;
+       }
++
++      if (teleop_soft_handover_active_) {
++        const double progress = std::min(
++            1.0,
++            static_cast<double>(teleop_handover_step_ + 1) /
++                static_cast<double>(teleop_handover_total_steps_));
++        // Quintic smoothstep: zero velocity and acceleration at both ends.
++        const double alpha = progress * progress * progress *
++                             (10.0 + progress * (-15.0 + 6.0 * progress));
++        const double max_delta = teleop_max_joint_speed_ * control_dt_;
++        bool caught_up = true;
++
++        for (int i = 0; i < G1_NUM_MOTOR; ++i) {
++          const double raw_target = motor_command_tmp.q_target.at(i);
++          const double blended_target = teleop_handover_source_q_[i] +
++              alpha * (raw_target - teleop_handover_source_q_[i]);
++          const double delta = std::clamp(
++              blended_target - teleop_handover_last_q_[i], -max_delta, max_delta);
++          const double limited_target = teleop_handover_last_q_[i] + delta;
++          motor_command_tmp.q_target.at(i) = static_cast<float>(limited_target);
++          teleop_handover_last_q_[i] = static_cast<float>(limited_target);
++          if (std::abs(raw_target - limited_target) > max_delta) {
++            caught_up = false;
++          }
++
++          // The policy observes previous actions in IsaacLab order.  Feed back
++          // the command that was actually sent, not the unblended raw action.
++          const int isaac_idx = isaaclab_to_mujoco[i];
++          last_action[isaac_idx] =
++              (limited_target - default_angles[i]) / g1_action_scale[i];
++        }
++
++        ++teleop_handover_step_;
++        if (progress >= 1.0 && caught_up) {
++          teleop_soft_handover_active_ = false;
++          std::cout << "[TeleopHandover] Soft handover complete" << std::endl;
++        }
++      }
+       motor_command_buffer_.SetData(motor_command_tmp);
+       return true;
+     }
+@@ -3386,10 +3465,15 @@ class G1Deploy {
+             } else {
+               std::cout << "Temporary motion completed." << std::endl;
+             }
+-            current_frame_ = 0; // Reset to beginning
+-            // Total reset: both base quaternion and delta heading
+-            reinitialize_heading_ = true;
+-            std::cout << "Reset to frame 0." << std::endl;
++            if (soft_teleop_handover_) {
++              current_frame_ = current_motion_->timesteps - 1;
++              std::cout << "[TeleopHandover] Holding final frame; press ENTER to switch to teleop" << std::endl;
++            } else {
++              current_frame_ = 0; // Reset to beginning
++              // Total reset: both base quaternion and delta heading
++              reinitialize_heading_ = true;
++              std::cout << "Reset to frame 0." << std::endl;
++            }
+           }
+         } else {
+           if (current_frame_ >= current_motion_->timesteps - saved_frame_for_observation_window_) {
+@@ -4131,6 +4215,9 @@ int main(int argc, char const* argv[]) {
+     std::cout << "  --logs-dir <path>: optional logs output base directory (default: logs/<timestamp>/)" << std::endl;
+     std::cout << "  --enable-csv-logs: enable writing CSV logs (default: OFF)" << std::endl;
+     std::cout << "  --enable-motion-recording: enable motion recording for ZMQ/planner (default: OFF)" << std::endl;
++    std::cout << "  --soft-teleop-handover: ENTER switches smoothly between reference motion and full-body POSE teleop" << std::endl;
++    std::cout << "  --teleop-blend-seconds <seconds>: soft handover duration (default: 3.0)" << std::endl;
++    std::cout << "  --teleop-max-joint-speed <rad/s>: motor-target slew limit during handover (default: 1.0)" << std::endl;
+     std::cout << "  --set-compliance <value>: set initial VR 3-point compliance (0.01=rigid, 0.5=compliant; default: [0.5, 0.5, 0.0])" << std::endl;
+     std::cout << "                                 Can specify 1 value (both hands) or 3 values (left_wrist,right_wrist,head)" << std::endl;
+     std::cout << "                                 Keyboard controls: g/h = left hand +/- 0.1, b/v = right hand +/- 0.1" << std::endl;
+@@ -4176,6 +4263,9 @@ int main(int argc, char const* argv[]) {
+   bool zmq_conflate = false;  // default off; enable with --zmq-conflate
+   bool zmq_verbose = false;
+   bool enableMotionRecording = false;  // default off; enable with --enable-motion-recording
++  bool softTeleopHandover = false;
++  double teleopBlendSeconds = 3.0;
++  double teleopMaxJointSpeed = 1.0;
+   int zmq_out_port = 5557;
+   std::string zmq_out_topic = "g1_debug";
+   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
+@@ -4357,6 +4447,29 @@ int main(int argc, char const* argv[]) {
+     } else if (std::string(argv[i]) == "--enable-motion-recording") {
+       enableMotionRecording = true;
+       std::cout << "[INFO] Motion recording enabled" << std::endl;
++    } else if (std::string(argv[i]) == "--soft-teleop-handover") {
++      softTeleopHandover = true;
++      std::cout << "[INFO] ENTER-triggered motion/full-body POSE teleop handover enabled" << std::endl;
++    } else if (std::string(argv[i]) == "--teleop-blend-seconds") {
++      if (i + 1 >= argc) {
++        std::cerr << "Error: --teleop-blend-seconds requires a value" << std::endl;
++        exit(1);
++      }
++      teleopBlendSeconds = std::stod(argv[++i]);
++      if (!std::isfinite(teleopBlendSeconds) || teleopBlendSeconds <= 0.0) {
++        std::cerr << "Error: --teleop-blend-seconds must be finite and greater than zero" << std::endl;
++        exit(1);
++      }
++    } else if (std::string(argv[i]) == "--teleop-max-joint-speed") {
++      if (i + 1 >= argc) {
++        std::cerr << "Error: --teleop-max-joint-speed requires a value" << std::endl;
++        exit(1);
++      }
++      teleopMaxJointSpeed = std::stod(argv[++i]);
++      if (!std::isfinite(teleopMaxJointSpeed) || teleopMaxJointSpeed <= 0.0) {
++        std::cerr << "Error: --teleop-max-joint-speed must be finite and greater than zero" << std::endl;
++        exit(1);
++      }
+     } else if (std::string(argv[i]) == "--set-compliance") {
+       if (i + 1 < argc) {
+         // Parse compliance values (can be 1 or 3 values)
+@@ -4412,6 +4525,11 @@ int main(int argc, char const* argv[]) {
+     }
+   }
+ 
++  if (softTeleopHandover && inputType != "zmq") {
++    std::cerr << "Error: --soft-teleop-handover currently requires --input-type zmq" << std::endl;
++    exit(1);
++  }
++
+   std::cout << "[DEBUG] Creating G1Deploy object..." << std::endl;
+   G1Deploy custom(
+     networkInterface,
+@@ -4441,7 +4559,10 @@ int main(int argc, char const* argv[]) {
+     zmq_out_topic,
+     enableMotionRecording,
+     initial_compliance,
+-    initial_max_close_ratio
++    initial_max_close_ratio,
++    softTeleopHandover,
++    teleopBlendSeconds,
++    teleopMaxJointSpeed
+   );
+   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
+   
+@@ -4468,4 +4589,3 @@ int main(int argc, char const* argv[]) {
+   std::cout << "[DEBUG] Program exiting normally..." << std::endl;
+   return 0;
+ }
+-
