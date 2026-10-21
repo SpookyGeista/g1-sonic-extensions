@@ -1,6 +1,13 @@
 # G1 SONIC Extensions
 
-G1 tools for Quest 3 body retargeting, motion-reference conversion and sequencing, ZMQ handover, and simulation playback.
+G1 tools for Quest 3 body retargeting, motion-reference processing, and switching between recorded motion capture and live full-body teleoperation.
+
+## Operation guides
+
+- [Motion capture → teleoperation → resume: three terminals, controls, and troubleshooting](docs/MOTION_CAPTURE_TELEOP.md)
+- [Tool workflows and complete tool index](docs/TOOLS.md)
+
+With `--soft-teleop-handover`, press **Enter** in the deployment terminal to pause a reference motion and switch to live POSE teleoperation. Press **Enter** again to blend back to the saved motion/frame. The guide covers calibration, stream readiness, and the required launch flags.
 
 ## Initialize the standalone tools
 

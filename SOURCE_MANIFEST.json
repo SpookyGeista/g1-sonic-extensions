@@ -11,7 +11,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "8ecddb9e88d0590ad01898c026f1141427a3477644b5ac28600d175d56ee3bf2"
+      "sha256": "36493f386d1e3bb411caf479670be0b17c261acc137d027ff923569efc988e18"
     },
     {
       "path": "UPSTREAM.json",
@@ -20,6 +20,14 @@
     {
       "path": "data/.gitkeep",
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "docs/MOTION_CAPTURE_TELEOP.md",
+      "sha256": "a2275e21ffcff4f01f97b61eea1aa46ab2f0f45306e7df7f5edff25393434920"
+    },
+    {
+      "path": "docs/TOOLS.md",
+      "sha256": "1576e66f83b8c320107db6595daa7c958eabd456eccd273b1d56d80d7416af7d"
     },
     {
       "path": "legal/Apache License - GEAR-SONIC.txt",
